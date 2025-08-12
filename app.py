@@ -1,61 +1,65 @@
 import os
+import json
 import requests
 from flask import Flask, request
 
-# Load secrets from Railway variables
+app = Flask(__name__)
+
+# Get environment variables from Railway
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY")
 
-# Telegram API base
-TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
-# Fireworks API base
-FIREWORKS_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
-FIREWORKS_HEADERS = {
-    "Authorization": f"Bearer {FIREWORKS_API_KEY}",
-    "Content-Type": "application/json"
-}
-
-app = Flask(__name__)
-
-def query_fireworks(prompt):
+# Function to send a prompt to Fireworks GPT-OSS-20B
+def ask_fireworks(prompt):
+    url = "https://api.fireworks.ai/inference/v1/chat/completions"
     payload = {
         "model": "accounts/fireworks/models/gpt-oss-20b",
+        "max_tokens": 300,
+        "top_p": 1,
+        "top_k": 40,
+        "presence_penalty": 0,
+        "frequency_penalty": 0,
+        "temperature": 0.6,
         "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 800,
-        "temperature": 0.2
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
     }
-    r = requests.post(FIREWORKS_URL, headers=FIREWORKS_HEADERS, json=payload, timeout=60)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {FIREWORKS_API_KEY}"
+    }
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
 
-def send_telegram_message(chat_id, text):
-    url = f"{TELEGRAM_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
+# Root route just to confirm bot is alive
+@app.route("/", methods=["GET"])
+def index():
+    return "Bot is running!"
 
-@app.route("/", methods=["POST"])
-def webhook():
-    data = request.get_json()
-    if "message" in data and "text" in data["message"]:
-        chat_id = data["message"]["chat"]["id"]
-        user_text = data["message"]["text"]
+# Telegram webhook route
+@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    update = request.get_json()
+
+    if "message" in update and "text" in update["message"]:
+        chat_id = update["message"]["chat"]["id"]
+        user_text = update["message"]["text"]
 
         try:
-            reply_text = query_fireworks(user_text)
+            bot_reply = ask_fireworks(user_text)
         except Exception as e:
-            reply_text = f"Error: {str(e)}"
+            bot_reply = f"Error: {str(e)}"
 
-        send_telegram_message(chat_id, reply_text)
+        send_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": chat_id, "text": bot_reply}
+        requests.post(send_url, json=payload)
 
-    return {"ok": True}
-
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is running!"
+    return "ok"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
