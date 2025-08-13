@@ -16,13 +16,24 @@ TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 FIREWORKS_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
 MODEL = "accounts/fireworks/models/gpt-oss-20b"
 
+# --- Persona system prompt ---
+SYSTEM_PROMPT = (
+    "You are Whispr, a friendly AI assistant. "
+    "Speak naturally, use casual tone, sometimes add emojis or light humor, "
+    "and always aim to help the user clearly and politely. "
+    "Remember context of recent conversation for relevance."
+)
+
+# --- Chat history per user (short-term memory) ---
+chat_histories = {}
+
 # --- Telegram helpers ---
 def tg_send(chat_id, text, reply_to=None):
     """Send message to Telegram, split into safe chunks."""
     MAX_LEN = 4000
     chunks = [text[i:i+MAX_LEN] for i in range(0, len(text), MAX_LEN)] or [""]
     for i, part in enumerate(chunks):
-        payload = {"chat_id": chat_id, "text": part}
+        payload = {"chat_id": chat_id, "text": part, "parse_mode": "Markdown"}
         if reply_to and i == 0:
             payload["reply_to_message_id"] = reply_to
         try:
@@ -42,11 +53,11 @@ def tg_typing(chat_id):
         print("tg_typing error:", e)
 
 # --- Fireworks API ---
-def ask_fireworks(prompt):
-    """Call Fireworks GPT-OSS-20B model."""
+def ask_fireworks(messages):
+    """Call Fireworks GPT-OSS-20B with conversation history."""
     payload = {
         "model": MODEL,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "max_tokens": 500,
         "temperature": 0.7,
         "top_p": 1,
@@ -85,17 +96,30 @@ def telegram_webhook():
 
     chat_id = msg["chat"]["id"]
     msg_id = msg.get("message_id")
-    text = msg["text"].strip()
+    user_text = msg["text"].strip()
 
-    if text.lower() in ("/start", "start"):
-        tg_send(chat_id, "Hi 👋 I’m your AI assistant. Send me a message!", reply_to=msg_id)
+    if user_text.lower() in ("/start", "start"):
+        tg_send(chat_id, "Hi 👋 I’m Whispr, your AI assistant. Send me a message!", reply_to=msg_id)
+        chat_histories[chat_id] = []  # clear history on start
         return "OK"
 
+    # --- Show typing indicator ---
     tg_typing(chat_id)
-    ai_reply = ask_fireworks(text)
 
+    # --- Prepare conversation messages (system + history + user input) ---
+    history = chat_histories.get(chat_id, [])
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": user_text}]
+
+    # --- Ask Fireworks AI ---
+    ai_reply = ask_fireworks(messages)
+
+    # --- Send AI response ---
     if ai_reply:
         tg_send(chat_id, ai_reply, reply_to=msg_id)
+        # Save the conversation in short-term memory (last 5 messages)
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": ai_reply})
+        chat_histories[chat_id] = history[-10:]  # keep last 10 messages total
     else:
         tg_send(chat_id, "⚠️ Sorry, I couldn’t reach the AI right now. Please try again.", reply_to=msg_id)
 
