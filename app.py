@@ -5,70 +5,86 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-# Environment variables (set in Railway)
+# Ensure environment vars are set
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY")
+if not TELEGRAM_TOKEN or not FIREWORKS_API_KEY:
+    raise RuntimeError("Missing TELEGRAM_TOKEN or FIREWORKS_API_KEY")
 
-# Telegram API URL
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Send a prompt to Fireworks GPT-OSS-20B
+def tg_send(chat_id, text, reply_to=None):
+    """Send message to Telegram (splits if too long)."""
+    MAX_LEN = 3500
+    for i in range(0, len(text), MAX_LEN):
+        part = text[i:i+MAX_LEN]
+        payload = {"chat_id": chat_id, "text": part}
+        if reply_to and i == 0:
+            payload["reply_to_message_id"] = reply_to
+        try:
+            requests.post(f"{TELEGRAM_URL}/sendMessage", json=payload, timeout=20)
+        except Exception as e:
+            print("tg_send error:", e)
+
 def ask_fireworks(prompt):
+    """Call Fireworks GPT-OSS-20B model."""
     url = "https://api.fireworks.ai/inference/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {FIREWORKS_API_KEY}",
         "Content-Type": "application/json",
+        "Accept": "application/json",
     }
     payload = {
         "model": "accounts/fireworks/models/gpt-oss-20b",
-        "messages": [
-            {"role": "system", "content": "You are a helpful AI assistant."},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 200
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 300,
+        "temperature": 0.6,
+        "top_p": 1,
+        "top_k": 40,
     }
-
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
-        else:
-            print("Fireworks API Error:", response.status_code, response.text)
-            return None
-    except Exception as e:
-        print("Error calling Fireworks API:", e)
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"].strip()
+    except requests.exceptions.RequestException as e:
+        print("Fireworks request error:", e, getattr(e, "response", None))
+        if e.response is not None:
+            print("Status code:", e.response.status_code, "; body:", e.response.text)
+        return None
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
+        print("Fireworks JSON parse error:", e, getattr(r, "text", None))
         return None
 
-# Send a message to Telegram
-def send_telegram_message(chat_id, text):
-    url = f"{TELEGRAM_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print("Error sending message to Telegram:", e)
+@app.get("/")
+def index():
+    return "Bot is running!"
 
-# Telegram webhook route
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+@app.post(f"/{TELEGRAM_TOKEN}")
 def telegram_webhook():
-    update = request.get_json()
+    update = request.get_json(silent=True) or {}
+    print("Incoming update:", update)
+    msg = update.get("message")
+    if not msg or not msg.get("text"):
+        return "OK"
 
-    if "message" in update and "text" in update["message"]:
-        chat_id = update["message"]["chat"]["id"]
-        text = update["message"]["text"]
+    chat_id = msg["chat"]["id"]
+    msg_id = msg.get("message_id")
+    text = msg["text"].strip()
 
-        reply = ask_fireworks(text)
-        if reply:
-            send_telegram_message(chat_id, reply)
-        else:
-            send_telegram_message(chat_id, "Sorry, I couldn’t reach the AI right now. Please try again.")
+    if text.lower() in ("/start", "start"):
+        tg_send(chat_id, "Hi! Send me something and I'll reply using AI.", reply_to=msg_id)
+        return "OK"
+
+    tg_send(chat_id, "Thinking...", reply_to=msg_id)
+    ai = ask_fireworks(text)
+
+    if ai:
+        tg_send(chat_id, ai, reply_to=msg_id)
+    else:
+        tg_send(chat_id, "Sorry, I couldn’t reach the AI right now. Please try again.", reply_to=msg_id)
 
     return "OK"
-
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is running!"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
