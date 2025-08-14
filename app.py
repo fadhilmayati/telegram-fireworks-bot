@@ -1,106 +1,92 @@
 import os
-import requests
-import threading
+import json
 import time
+import requests
 from flask import Flask, request
 
 app = Flask(__name__)
 
+# Environment variables from Railway (or local .env)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY")
-TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-def send_typing(chat_id):
-    """Show 'typing...' in Telegram."""
-    try:
-        requests.post(f"{TELEGRAM_URL}/sendChatAction", json={
-            "chat_id": chat_id,
-            "action": "typing"
-        })
-    except Exception as e:
-        print("Error sending typing action:", e)
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-def split_text(text, chunk_size=20):
-    """Split text into small chunks for streaming."""
-    return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-
-def stream_message(chat_id, text):
-    """Send text gradually in one editable bubble."""
-    # Send initial placeholder message
-    resp = requests.post(f"{TELEGRAM_URL}/sendMessage", json={
-        "chat_id": chat_id,
-        "text": "…"
-    }).json()
-
-    if not resp.get("ok"):
-        return
-
-    message_id = resp["result"]["message_id"]
-    buffer = ""
-
-    for chunk in split_text(text):
-        buffer += chunk
-        send_typing(chat_id)
-        time.sleep(min(len(chunk) / 10, 0.5))  # Delay per chunk
-        requests.post(f"{TELEGRAM_URL}/editMessageText", json={
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "text": buffer
-        })
+# ----- Telegram send helpers -----
 
 def send_message(chat_id, text):
-    """Send message instantly."""
-    try:
-        requests.post(f"{TELEGRAM_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
-    except Exception as e:
-        print("Error sending message:", e)
+    requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
+
+def send_typing(chat_id):
+    requests.post(f"{TELEGRAM_API_URL}/sendChatAction", json={"chat_id": chat_id, "action": "typing"})
+
+# ----- LLM Query -----
 
 def ask_fireworks(prompt):
-    """Call Fireworks AI API."""
     url = "https://api.fireworks.ai/inference/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {FIREWORKS_API_KEY}",
         "Content-Type": "application/json"
     }
-    data = {
+    payload = {
         "model": "accounts/fireworks/models/llama-v3p1-8b-instruct",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 200,
+        "max_tokens": 300,
         "temperature": 0.7
     }
-    try:
-        response = requests.post(url, headers=headers, json=data, timeout=20)
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print("Error calling Fireworks:", e)
-        return "Sorry, something went wrong."
+    resp = requests.post(url, headers=headers, json=payload)
+    if resp.status_code == 200:
+        return resp.json()["choices"][0]["message"]["content"]
+    else:
+        return "Sorry, I couldn't process that right now."
 
-def handle_update(update):
-    """Process each incoming update."""
+# ----- Friend-style reply -----
+
+def send_friend_style(chat_id, text, short_threshold=80, delay_between=1.5):
+    """
+    Send LLM reply in separate Telegram bubbles like a human friend.
+    Short replies go in one bubble. Long replies split into sentences.
+    """
+    text = text.strip()
+
+    if len(text) <= short_threshold:
+        # Just send as one bubble
+        send_typing(chat_id)
+        time.sleep(min(len(text) / 10, delay_between))
+        send_message(chat_id, text)
+    else:
+        # Split into sentences for multiple bubbles
+        sentences = text.replace("\n", " ").split(". ")
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            send_typing(chat_id)
+            time.sleep(min(len(sentence) / 10, delay_between))
+            send_message(chat_id, sentence)
+
+# ----- Webhook -----
+
+@app.route(f"/webhook/{TELEGRAM_TOKEN}", methods=["POST"])
+def webhook():
+    update = request.get_json()
     if "message" in update and "text" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
         user_message = update["message"]["text"]
 
-        # Show typing first
-        send_typing(chat_id)
-
-        # Get reply from AI
+        # Ask LLM
         reply = ask_fireworks(user_message)
 
-        # Stream reply in a single bubble
-        stream_message(chat_id, reply)
+        # Send in friend style
+        send_friend_style(chat_id, reply)
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    """Telegram webhook endpoint."""
-    update = request.get_json()
-    threading.Thread(target=handle_update, args=(update,)).start()
-    return {"ok": True}
+    return "ok", 200
+
+# ----- Health check -----
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Bot is running."
+    return "Bot is running!"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=8080)
