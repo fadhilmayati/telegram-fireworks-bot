@@ -1,30 +1,22 @@
 import os
 import requests
+import threading
 from flask import Flask, request
 
 app = Flask(__name__)
 
-# Environment variables
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY")
-
-# Telegram API base URL
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 def send_message(chat_id, text):
-    """Send message to Telegram user."""
     url = f"{TELEGRAM_URL}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
     try:
-        requests.post(url, json=payload)
+        requests.post(url, json={"chat_id": chat_id, "text": text})
     except Exception as e:
         print("Error sending message:", e)
 
 def ask_fireworks(prompt):
-    """Send prompt to Fireworks AI and return the result."""
     url = "https://api.fireworks.ai/inference/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {FIREWORKS_API_KEY}",
@@ -36,31 +28,26 @@ def ask_fireworks(prompt):
         "max_tokens": 200,
         "temperature": 0.7
     }
-
     try:
         response = requests.post(url, headers=headers, json=data, timeout=20)
         response.raise_for_status()
-        result = response.json()
-        return result["choices"][0]["message"]["content"].strip()
+        return response.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print("Error calling Fireworks:", e)
-        return "Sorry, something went wrong while processing your request."
+        return "Sorry, something went wrong."
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    """Handle incoming Telegram updates."""
-    update = request.get_json()
-
+def handle_update(update):
     if "message" in update and "text" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
         user_message = update["message"]["text"]
-
-        # Get AI reply
         reply = ask_fireworks(user_message)
-
-        # Send back to Telegram
         send_message(chat_id, reply)
 
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = request.get_json()
+    # Respond immediately to Telegram
+    threading.Thread(target=handle_update, args=(update,)).start()
     return {"ok": True}
 
 @app.route("/", methods=["GET"])
@@ -68,4 +55,4 @@ def home():
     return "Bot is running."
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
