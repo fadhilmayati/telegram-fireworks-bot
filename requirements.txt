@@ -1,7 +1,8 @@
 flask
-requests
-langchain-core
-langchain-openai
+python-telegram-bot==20.6
+langchain
 langchain-community
-sqlalchemy
 psycopg2-binary
+sqlalchemy
+requests
+python-dotenv
