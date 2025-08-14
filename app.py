@@ -5,6 +5,14 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
+from db import init_db, save_message
+
+# Initialize database at startup
+init_db()
+
+# Inside your Telegram message handler:
+save_message(user_id, user_message)
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -53,6 +61,7 @@ def webhook():
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running."
+    
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
